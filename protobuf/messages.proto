@@ -1,0 +1,7 @@
+message HeartBeat {
+  optional uint64 createdTime = 1;
+}
+
+message PeerList {
+  repeated string addresses = 1;
+}
