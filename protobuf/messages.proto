@@ -1,3 +1,9 @@
+// one size fit all message to just use one wire for a peer's message bus
+message PeerMessage {
+  optional HeartBeat heartBeat = 1;
+  optional PeerList peerList = 2;
+}
+
 message HeartBeat {
   optional uint64 createdTime = 1;
 }
