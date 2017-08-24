@@ -5,7 +5,7 @@ message PeerMessage {
 }
 
 message HeartBeat {
-  optional uint64 createdTime = 1;
+  required uint64 createdTime = 1;
 }
 
 message PeerList {

@@ -11,9 +11,10 @@ import (
 )
 
 type Server struct {
-	listener net.Listener
-	lock     sync.Mutex
-	peers    map[net.Addr]*net.Conn // might not be necessary
+	listener          net.Listener
+	lock              sync.Mutex
+	peers             map[net.Addr]*net.Conn // might not be necessary
+	heartbeatInterval time.Duration
 }
 
 func NewServer(port uint16) (*Server, error) {
@@ -24,11 +25,17 @@ func NewServer(port uint16) (*Server, error) {
 		return nil, err
 	} else {
 		rx := Server{
-			listener: listener,
-			lock:     sync.Mutex{},
-			peers:    make(map[net.Addr]*net.Conn),
+			listener:          listener,
+			lock:              sync.Mutex{},
+			peers:             make(map[net.Addr]*net.Conn),
+			heartbeatInterval: 3 * time.Second,
 		}
+		// coroutines for background stuff
+		// accepts connections
 		go rx.acceptLoop()
+
+		// broadcasts heartbeats
+		go rx.heartbeatLoop()
 		return &rx, nil
 	}
 }
@@ -37,7 +44,7 @@ func (rx *Server) acceptLoop() error {
 	for {
 		conn, err := rx.listener.Accept()
 		if err == nil {
-			log.Println("peer connected", conn)
+			log.Println("peer connected", conn.RemoteAddr())
 			go rx.recordPeer(&conn)
 			go rx.handle(&conn)
 		} else {
@@ -47,6 +54,15 @@ func (rx *Server) acceptLoop() error {
 	}
 }
 
+// sends heartbeats in a loop
+func (rx *Server) heartbeatLoop() {
+	for {
+		rx.BroadcastHeartBeat()
+		time.Sleep(rx.heartbeatInterval)
+	}
+}
+
+// handles traffic on a connected (accepted) socket
 func (rx *Server) handle(conn *net.Conn) {
 	// TODO: probably either: have a separate conn for larger messages
 	//   OR: use a growable buffer
@@ -56,13 +72,28 @@ func (rx *Server) handle(conn *net.Conn) {
 		bytesRead, err := (*conn).Read(buffer)
 		if err != nil {
 			rx.removePeer(conn)
+			log.Println("error reading", err)
 			break
 		}
 		received := buffer[:bytesRead]
-		log.Println("received", bytesRead, "bytes", received)
+		log.Println("received", bytesRead, "bytes", received, "from", (*conn).RemoteAddr())
 		var newMessage messages.PeerMessage
 		proto.Unmarshal(received, &newMessage)
-		log.Println("unmarshalled protobuf", newMessage)
+		rx.onReceive(&newMessage, conn)
+	}
+}
+
+// reacts to a received protobuf PeerMessage
+func (rx *Server) onReceive(message *messages.PeerMessage, conn *net.Conn) {
+	log.Println("unmarshalled protobuf", *message)
+	// due to the optional payloads, many message types can be composed into a single PeerMessage
+	if message.GetHeartBeat() != nil {
+		//TODO: maybe delegate to a channel
+		createdTime := message.GetHeartBeat().GetCreatedTime()
+		latency := uint64(time.Now().UnixNano()) - createdTime
+		log.Println("got heartbeat(", createdTime, "), latency =", latency, "ns")
+	}
+	if message.GetPeerList() != nil {
 	}
 }
 
@@ -82,11 +113,13 @@ func (rx *Server) removePeer(conn *net.Conn) {
 }
 
 func (rx *Server) ConnectToPeer(address string) {
+	// TODO: don't connect if it's already connected
 	log.Println("connecting to peer", address)
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		log.Println("error connecting to peer", err)
 	} else {
+		go rx.handle(&conn)
 		rx.recordPeer(&conn)
 	}
 }
@@ -126,10 +159,11 @@ func HeartBeatMessage() []byte {
 }
 
 func Start() {
-	var _ = startServer(9001)
+	s1 := startServer(9001)
 	s2 := startServer(9002)
 	s2.ConnectToPeer("0.0.0.0:9001")
-	s2.BroadcastHeartBeat()
+
+	var _ = s1
 
 	<-make(chan bool)
 }
