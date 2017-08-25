@@ -10,26 +10,41 @@ import (
 	"time"
 )
 
+type HeartBeatChan struct {
+	payload *messages.HeartBeat
+	conn    net.Conn
+}
+
 type Channels struct {
-	heartbeat chan struct {
-		payload *messages.HeartBeat
-		conn    net.Conn
-	}
+	heartbeat       chan HeartBeatChan // receives heartbeats
+	electionTimeout chan uint64        // periodic fixed interval to check for election timeouts. messages are a timestamp close to the current time
+	holdElection    chan messages.HoldElection
 }
 
 func (rx *Server) channelLoop() {
+	//state
+	var lastHeartbeat uint64 = 0
+	//var term uint32 = 0
+
 	for {
 		select {
 		case message := <-rx.channels.heartbeat:
-			//TODO: maybe delegate to a channel
 			createdTime := message.payload.GetCreatedTime()
 			latency := uint64(time.Now().UnixNano()) - createdTime
 			log.Println("got heartbeat(", createdTime, "), latency =", latency, "ns")
+			lastHeartbeat = createdTime
+		case now := <-rx.channels.electionTimeout:
+			if lastHeartbeat+uint64(rx.heartbeatInterval) < now {
+				log.Println("need to elect")
+			} else {
+				log.Println("pass")
+			}
 		}
 	}
 }
 
 type Server struct {
+	Name              string
 	listener          net.Listener
 	lock              sync.Mutex
 	peers             map[net.Addr]*net.Conn // might not be necessary
@@ -39,7 +54,7 @@ type Server struct {
 	channels          Channels
 }
 
-func NewServer(port uint16) (*Server, error) {
+func NewServer(port uint16, name string) (*Server, error) {
 	address := fmt.Sprintf("0.0.0.0:%d", port)
 	listener, err := net.Listen("tcp", address)
 	log.Println("listening on", address)
@@ -47,6 +62,7 @@ func NewServer(port uint16) (*Server, error) {
 		return nil, err
 	} else {
 		rx := Server{
+			Name:              name,
 			listener:          listener,
 			lock:              sync.Mutex{},
 			peers:             make(map[net.Addr]*net.Conn),
@@ -54,10 +70,8 @@ func NewServer(port uint16) (*Server, error) {
 			term:              0,
 			electionTimeout:   1 * time.Second,
 			channels: Channels{
-				heartbeat: make(chan struct {
-					payload *messages.HeartBeat
-					conn    net.Conn
-				}),
+				heartbeat:       make(chan HeartBeatChan, 32),
+				electionTimeout: make(chan uint64, 32),
 			},
 		}
 		// coroutines for background stuff
@@ -100,11 +114,9 @@ func (rx *Server) heartbeatLoop() {
 }
 
 func (rx *Server) termLoop() {
-	// check every few seconds when the last heartbeat received from the leader was
-	//var isLeader bool = false
 	for {
 		time.Sleep(rx.electionTimeout)
-
+		rx.channels.electionTimeout <- uint64(time.Now().UnixNano())
 	}
 }
 
@@ -134,10 +146,7 @@ func (rx *Server) onReceive(message *messages.PeerMessage, conn net.Conn) {
 	log.Println("unmarshalled protobuf", *message)
 	// due to the optional payloads, many message types can be composed into a single PeerMessage
 	if message.GetHeartBeat() != nil {
-		rx.channels.heartbeat <- struct {
-			payload *messages.HeartBeat
-			conn    net.Conn
-		}{message.GetHeartBeat(), conn}
+		rx.channels.heartbeat <- HeartBeatChan{message.GetHeartBeat(), conn}
 	}
 	if message.GetPeerList() != nil {
 	}
@@ -182,11 +191,11 @@ func (rx *Server) Broadcast(data []byte) {
 }
 
 func (rx *Server) BroadcastHeartBeat() {
-	rx.Broadcast(HeartBeatMessage())
+	rx.Broadcast(rx.HeartBeatMessage())
 }
 
-func startServer(port uint16) *Server {
-	server, err := NewServer(port)
+func startServer(port uint16, name string) *Server {
+	server, err := NewServer(port, name)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -194,19 +203,20 @@ func startServer(port uint16) *Server {
 }
 
 // serializers
-func HeartBeatMessage() []byte {
+func (rx *Server) HeartBeatMessage() []byte {
 	heartBeat := &messages.HeartBeat{
 		CreatedTime: proto.Uint64(uint64(time.Now().UnixNano())),
 	}
 	data, _ := proto.Marshal(&messages.PeerMessage{
 		HeartBeat: heartBeat,
+		Name:      &rx.Name,
 	})
 	return data
 }
 
 func Start() {
-	s1 := startServer(9001)
-	s2 := startServer(9002)
+	s1 := startServer(9001, "alice")
+	s2 := startServer(9002, "bob")
 	s2.ConnectToPeer("0.0.0.0:9001")
 
 	var _ = s1

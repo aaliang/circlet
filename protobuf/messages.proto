@@ -1,7 +1,10 @@
 // one size fit all message to just use one wire for a peer's message bus
 message PeerMessage {
-  optional HeartBeat heartBeat = 1;
-  optional PeerList peerList = 2;
+  required string name = 1;
+  optional HeartBeat heartBeat = 2;
+  optional PeerList peerList = 3;
+  optional HoldElection holdElection = 4;
+  optional Ballot ballot = 5;
 }
 
 message HeartBeat {
@@ -12,10 +15,10 @@ message PeerList {
   repeated string addresses = 1;
 }
 
-/*message HoldElection {
+message HoldElection {
   
 }
 
 message Ballot {
   required string name = 1;
-}*/
+}
