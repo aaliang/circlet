@@ -11,3 +11,11 @@ message HeartBeat {
 message PeerList {
   repeated string addresses = 1;
 }
+
+/*message HoldElection {
+  
+}
+
+message Ballot {
+  required string name = 1;
+}*/
