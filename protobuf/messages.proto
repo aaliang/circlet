@@ -1,24 +1,26 @@
 // one size fit all message to just use one wire for a peer's message bus
 message PeerMessage {
-  required string name = 1;
-  optional HeartBeat heartBeat = 2;
-  optional PeerList peerList = 3;
-  optional HoldElection holdElection = 4;
-  optional Ballot ballot = 5;
+  optional HeartBeat heartBeat = 1;
+  optional PeerList peerList = 2;
+  optional HoldElection holdElection = 3;
+  optional Ballot ballot = 4;
 }
 
 message HeartBeat {
-  required uint64 createdTime = 1;
+  required string name = 1;
+  required uint64 createdTime = 2;
 }
 
 message PeerList {
-  repeated string addresses = 1;
+  required string name = 1;
+  repeated string addresses = 2;
 }
 
 message HoldElection {
-  required uint32 term = 1;
-  required uint32 lastLogTerm = 2;
-  required uint64 lastLogIndex = 3;
+  required string name = 1;
+  required uint32 term = 2;
+  required uint32 lastLogTerm = 3;
+  required uint64 lastLogIndex = 4;
 }
 
 message Ballot {

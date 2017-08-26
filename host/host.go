@@ -9,15 +9,9 @@ import (
 	"time"
 )
 
-type HeartBeatChan struct {
-	name    *string
-	payload *messages.HeartBeat
-	conn    net.Conn
-}
-
 type Channels struct {
-	heartbeat       chan *HeartBeatChan // receives heartbeats
-	electionTimeout chan uint64         // periodic fixed interval to check for election timeouts. messages are a timestamp close to the current time
+	heartbeat       chan *messages.HeartBeat // receives heartbeats
+	electionTimeout chan uint64              // periodic fixed interval to check for election timeouts. messages are a timestamp close to the current time
 	holdElection    chan *messages.HoldElection
 }
 
@@ -31,10 +25,10 @@ func (rx *Server) raftLoop() {
 	for {
 		select {
 		case message := <-rx.channels.heartbeat:
-			createdTime := message.payload.GetCreatedTime()
+			createdTime := message.GetCreatedTime()
 			latency := uint64(time.Now().UnixNano()) - createdTime
 			log.Println("got heartbeat(", createdTime, "), latency =", latency, "ns")
-			fromName := *message.name
+			fromName := message.GetName()
 			if fromName == leader {
 				lastHeartbeat = createdTime
 			}
@@ -110,7 +104,7 @@ func NewServer(port uint16, name string) (*Server, error) {
 			heartbeatInterval: 3 * time.Second,
 			electionTimeout:   1 * time.Second,
 			channels: Channels{
-				heartbeat:       make(chan *HeartBeatChan, 32),
+				heartbeat:       make(chan *messages.HeartBeat, 32),
 				electionTimeout: make(chan uint64, 32),
 				holdElection:    make(chan *messages.HoldElection, 32),
 			},
@@ -196,8 +190,7 @@ func (rx *Server) onReceive(message *messages.PeerMessage, conn net.Conn) {
 	log.Println("unmarshalled protobuf", *message)
 	// due to the optional payloads, many message types can be composed into a single PeerMessage
 	if message.GetHeartBeat() != nil {
-		name := message.GetName()
-		rx.channels.heartbeat <- &HeartBeatChan{&name, message.GetHeartBeat(), conn}
+		rx.channels.heartbeat <- message.GetHeartBeat()
 	}
 	if message.GetPeerList() != nil {
 		// do nothing
@@ -229,18 +222,6 @@ func (rx *Server) ConnectToPeer(address string) {
 	}
 }
 
-/*
-func (rx *Server) Broadcast(data []byte) {
-	for conn_id, conn := range rx.peers {
-		log.Println("sending", len(data), "bytes to", conn_id)
-		// TODO: Conn.Write is ambiguous if partial writes are possible. should circle back
-		_, err := (*conn).Write(data)
-		if err != nil {
-			rx.removePeer(conn)
-		}
-	}
-}*/
-
 func (rx *Server) BroadcastHeartBeat() {
 	rx.connChannels.broadcast <- rx.HeartBeatMessage()
 }
@@ -259,11 +240,11 @@ func startServer(port uint16, name string) *Server {
 
 func (rx *Server) HoldElectionMessage(term uint32) []byte {
 	elect := &messages.HoldElection{
+		Name: &rx.Name,
 		Term: proto.Uint32(term),
 	}
 	data, _ := proto.Marshal(&messages.PeerMessage{
 		HoldElection: elect,
-		Name:         &rx.Name,
 	})
 	return data
 }
@@ -271,11 +252,11 @@ func (rx *Server) HoldElectionMessage(term uint32) []byte {
 // serializers
 func (rx *Server) HeartBeatMessage() []byte {
 	heartBeat := &messages.HeartBeat{
+		Name:        &rx.Name,
 		CreatedTime: proto.Uint64(uint64(time.Now().UnixNano())),
 	}
 	data, _ := proto.Marshal(&messages.PeerMessage{
 		HeartBeat: heartBeat,
-		Name:      &rx.Name,
 	})
 	return data
 }
