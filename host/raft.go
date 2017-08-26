@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// raftChannel is probably poorly named. most of the things in here are pertaining to raft
 type RaftChannels struct {
 	heartbeat       chan *messages.HeartBeat // receives heartbeats
 	electionTimeout chan uint64              // periodic fixed interval to check for election timeouts. messages are a timestamp close to the current time
