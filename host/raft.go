@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/golang/protobuf/proto"
 	"log"
+	"math/rand"
 	"net"
 	"time"
 )
@@ -14,6 +15,19 @@ type RaftChannels struct {
 	heartbeat       chan *messages.HeartBeat // receives heartbeats
 	electionTimeout chan uint64              // periodic fixed interval to check for election timeouts. messages are a timestamp close to the current time
 	holdElection    chan *messages.HoldElection
+	numPeers        chan int
+}
+
+// at some point may want to multiplex on a channel instead of select over multiple
+// go's select over multiple channels relies on the futex syscall which
+// be called more as more channels are being monitored
+func NewRaftChannels() *RaftChannels {
+	return &RaftChannels{
+		heartbeat:       make(chan *messages.HeartBeat, 32),
+		electionTimeout: make(chan uint64, 32),
+		holdElection:    make(chan *messages.HoldElection, 32),
+		numPeers:        make(chan int, 4),
+	}
 }
 
 func (rx *Server) raftLoop() {
@@ -22,6 +36,7 @@ func (rx *Server) raftLoop() {
 	var leader string
 	var isElectionNow = false // this might not even really be needed
 	var term uint32 = 0
+	var numPeers int = 0
 
 	for {
 		select {
@@ -46,11 +61,17 @@ func (rx *Server) raftLoop() {
 				}
 			}
 		case electionRequest := <-rx.raftChannels.holdElection:
+			log.Println("got electionRequest", electionRequest)
 			if *(electionRequest.Term) > term {
+				isElectionNow = true
 				// need to vote
 			} /*else {
 				// do nothing
 			}*/
+		case n := <-rx.raftChannels.numPeers:
+			numPeers = n
+			log.Println(numPeers, "peers")
+			var _ = numPeers
 		}
 	}
 }
@@ -61,6 +82,14 @@ type ConnChannels struct {
 	broadcast  chan []byte
 }
 
+func NewConnChannels() *ConnChannels {
+	return &ConnChannels{
+		newConn:    make(chan *net.Conn),
+		removeConn: make(chan *net.Conn),
+		broadcast:  make(chan []byte, 32),
+	}
+}
+
 // manages broadcasts and peer lists
 func (rx *Server) connLoop() {
 	peers := make(map[net.Addr]*net.Conn)
@@ -68,8 +97,11 @@ func (rx *Server) connLoop() {
 		select {
 		case newConn := <-rx.connChannels.newConn:
 			peers[(*newConn).RemoteAddr()] = newConn
+			// update the raftstate
+			rx.raftChannels.numPeers <- len(peers)
 		case removeConn := <-rx.connChannels.removeConn:
 			delete(peers, (*removeConn).RemoteAddr())
+			rx.raftChannels.numPeers <- len(peers)
 		case data := <-rx.connChannels.broadcast:
 			for conn_id, conn := range peers {
 				log.Println("sending", len(data), "bytes to", conn_id)
@@ -84,12 +116,13 @@ func (rx *Server) connLoop() {
 }
 
 type Server struct {
-	Name              string
-	listener          net.Listener
-	heartbeatInterval time.Duration
-	electionTimeout   time.Duration
-	raftChannels      RaftChannels
-	connChannels      ConnChannels
+	Name                 string
+	listener             net.Listener
+	heartbeatInterval    time.Duration
+	electionTimeout      time.Duration
+	electionTimeoutDrift time.Duration
+	raftChannels         *RaftChannels
+	connChannels         *ConnChannels
 }
 
 func NewServer(port uint16, name string) (*Server, error) {
@@ -100,20 +133,13 @@ func NewServer(port uint16, name string) (*Server, error) {
 		return nil, err
 	} else {
 		rx := Server{
-			Name:              name,
-			listener:          listener,
-			heartbeatInterval: 3 * time.Second,
-			electionTimeout:   1 * time.Second,
-			raftChannels: RaftChannels{
-				heartbeat:       make(chan *messages.HeartBeat, 32),
-				electionTimeout: make(chan uint64, 32),
-				holdElection:    make(chan *messages.HoldElection, 32),
-			},
-			connChannels: ConnChannels{
-				newConn:    make(chan *net.Conn),
-				removeConn: make(chan *net.Conn),
-				broadcast:  make(chan []byte, 32),
-			},
+			Name:                 name,
+			listener:             listener,
+			heartbeatInterval:    3 * time.Second,
+			electionTimeout:      2 * time.Second,
+			electionTimeoutDrift: 800 * time.Millisecond,
+			raftChannels:         NewRaftChannels(),
+			connChannels:         NewConnChannels(),
 		}
 		// coroutines for background stuff
 		// accepts connections
@@ -157,10 +183,14 @@ func (rx *Server) heartbeatLoop() {
 	}
 }
 
-// TODO: use randomized electionTimeout
 func (rx *Server) electionTimeoutLoop() {
 	for {
-		time.Sleep(rx.electionTimeout)
+		// randomize election timeout to minimize colliding elections
+		driftRange := 2 * rx.electionTimeoutDrift
+		d := time.Duration(rand.Intn(int(driftRange)))
+		sleepDuration := rx.electionTimeout - rx.electionTimeoutDrift + d
+		//log.Println("sleep duration:", sleepDuration)
+		time.Sleep(sleepDuration)
 		rx.raftChannels.electionTimeout <- uint64(time.Now().UnixNano())
 	}
 }
