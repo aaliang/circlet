@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-type Channels struct {
+type RaftChannels struct {
 	heartbeat       chan *messages.HeartBeat // receives heartbeats
 	electionTimeout chan uint64              // periodic fixed interval to check for election timeouts. messages are a timestamp close to the current time
 	holdElection    chan *messages.HoldElection
@@ -24,7 +24,7 @@ func (rx *Server) raftLoop() {
 
 	for {
 		select {
-		case message := <-rx.channels.heartbeat:
+		case message := <-rx.raftChannels.heartbeat:
 			createdTime := message.GetCreatedTime()
 			latency := uint64(time.Now().UnixNano()) - createdTime
 			log.Println("got heartbeat(", createdTime, "), latency =", latency, "ns")
@@ -32,7 +32,7 @@ func (rx *Server) raftLoop() {
 			if fromName == leader {
 				lastHeartbeat = createdTime
 			}
-		case now := <-rx.channels.electionTimeout:
+		case now := <-rx.raftChannels.electionTimeout:
 			if !isElectionNow {
 				if lastHeartbeat+uint64(rx.heartbeatInterval) < now {
 					log.Println("need to elect")
@@ -44,7 +44,7 @@ func (rx *Server) raftLoop() {
 					log.Println("pass")
 				}
 			}
-		case electionRequest := <-rx.channels.holdElection:
+		case electionRequest := <-rx.raftChannels.holdElection:
 			if *(electionRequest.Term) > term {
 				// need to vote
 			} /*else {
@@ -87,7 +87,7 @@ type Server struct {
 	listener          net.Listener
 	heartbeatInterval time.Duration
 	electionTimeout   time.Duration
-	channels          Channels
+	raftChannels      RaftChannels
 	connChannels      ConnChannels
 }
 
@@ -103,7 +103,7 @@ func NewServer(port uint16, name string) (*Server, error) {
 			listener:          listener,
 			heartbeatInterval: 3 * time.Second,
 			electionTimeout:   1 * time.Second,
-			channels: Channels{
+			raftChannels: RaftChannels{
 				heartbeat:       make(chan *messages.HeartBeat, 32),
 				electionTimeout: make(chan uint64, 32),
 				holdElection:    make(chan *messages.HoldElection, 32),
@@ -160,7 +160,7 @@ func (rx *Server) heartbeatLoop() {
 func (rx *Server) electionTimeoutLoop() {
 	for {
 		time.Sleep(rx.electionTimeout)
-		rx.channels.electionTimeout <- uint64(time.Now().UnixNano())
+		rx.raftChannels.electionTimeout <- uint64(time.Now().UnixNano())
 	}
 }
 
@@ -190,13 +190,13 @@ func (rx *Server) onReceive(message *messages.PeerMessage, conn net.Conn) {
 	log.Println("unmarshalled protobuf", *message)
 	// due to the optional payloads, many message types can be composed into a single PeerMessage
 	if message.GetHeartBeat() != nil {
-		rx.channels.heartbeat <- message.GetHeartBeat()
+		rx.raftChannels.heartbeat <- message.GetHeartBeat()
 	}
 	if message.GetPeerList() != nil {
 		// do nothing
 	}
 	if message.GetHoldElection() != nil {
-		rx.channels.holdElection <- message.GetHoldElection()
+		rx.raftChannels.holdElection <- message.GetHoldElection()
 	}
 }
 
