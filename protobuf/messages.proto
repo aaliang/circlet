@@ -16,7 +16,9 @@ message PeerList {
 }
 
 message HoldElection {
-  
+  required uint32 term = 1;
+  required uint32 lastLogTerm = 2;
+  required uint64 lastLogIndex = 3;
 }
 
 message Ballot {

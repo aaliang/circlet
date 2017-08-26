@@ -16,16 +16,17 @@ type HeartBeatChan struct {
 }
 
 type Channels struct {
-	heartbeat       chan HeartBeatChan // receives heartbeats
-	electionTimeout chan uint64        // periodic fixed interval to check for election timeouts. messages are a timestamp close to the current time
-	holdElection    chan messages.HoldElection
+	heartbeat       chan *HeartBeatChan // receives heartbeats
+	electionTimeout chan uint64         // periodic fixed interval to check for election timeouts. messages are a timestamp close to the current time
+	holdElection    chan *messages.HoldElection
 }
 
-func (rx *Server) channelLoop() {
+func (rx *Server) raftLoop() {
 	//state
 	var lastHeartbeat uint64 = 0
 	var leader string
 	var isElectionNow = false // this might not even really be needed
+	var term uint32 = 0
 
 	for {
 		select {
@@ -42,10 +43,19 @@ func (rx *Server) channelLoop() {
 				if lastHeartbeat+uint64(rx.heartbeatInterval) < now {
 					log.Println("need to elect")
 					isElectionNow = true
+					term++
+					rx.BroadcastHoldElection(term)
+					// TODO: vote for self
 				} else {
 					log.Println("pass")
 				}
 			}
+		case electionRequest := <-rx.channels.holdElection:
+			if *(electionRequest.Term) > term {
+				// need to vote
+			} /*else {
+				// do nothing
+			}*/
 		}
 	}
 }
@@ -66,7 +76,6 @@ func (rx *Server) connLoop() {
 		case removeConn := <-rx.connChannels.removeConn:
 			delete(peers, (*removeConn).RemoteAddr())
 		case data := <-rx.connChannels.broadcast:
-			log.Println("hello")
 			for conn_id, conn := range peers {
 				log.Println("sending", len(data), "bytes to", conn_id)
 				// TODO: Conn.Write is ambiguous if partial writes are possible. should circle back
@@ -83,7 +92,6 @@ type Server struct {
 	Name              string
 	listener          net.Listener
 	heartbeatInterval time.Duration
-	term              uint32
 	electionTimeout   time.Duration
 	channels          Channels
 	connChannels      ConnChannels
@@ -100,11 +108,11 @@ func NewServer(port uint16, name string) (*Server, error) {
 			Name:              name,
 			listener:          listener,
 			heartbeatInterval: 3 * time.Second,
-			term:              0,
 			electionTimeout:   1 * time.Second,
 			channels: Channels{
-				heartbeat:       make(chan HeartBeatChan, 32),
+				heartbeat:       make(chan *HeartBeatChan, 32),
 				electionTimeout: make(chan uint64, 32),
+				holdElection:    make(chan *messages.HoldElection, 32),
 			},
 			connChannels: ConnChannels{
 				newConn:    make(chan *net.Conn),
@@ -120,10 +128,10 @@ func NewServer(port uint16, name string) (*Server, error) {
 		go rx.heartbeatLoop()
 
 		// manages election/term related things
-		go rx.termLoop()
+		go rx.electionTimeoutLoop()
 
-		// handles fanned in channel messages
-		go rx.channelLoop()
+		// handles fanned in channel messages related to raft
+		go rx.raftLoop()
 
 		// handles outbound broadcasts and peer connection state
 		go rx.connLoop()
@@ -154,8 +162,8 @@ func (rx *Server) heartbeatLoop() {
 	}
 }
 
-// TODO: use randomized electionTimeout. Also, rename to electionTimeoutLoop
-func (rx *Server) termLoop() {
+// TODO: use randomized electionTimeout
+func (rx *Server) electionTimeoutLoop() {
 	for {
 		time.Sleep(rx.electionTimeout)
 		rx.channels.electionTimeout <- uint64(time.Now().UnixNano())
@@ -189,30 +197,23 @@ func (rx *Server) onReceive(message *messages.PeerMessage, conn net.Conn) {
 	// due to the optional payloads, many message types can be composed into a single PeerMessage
 	if message.GetHeartBeat() != nil {
 		name := message.GetName()
-		rx.channels.heartbeat <- HeartBeatChan{&name, message.GetHeartBeat(), conn}
+		rx.channels.heartbeat <- &HeartBeatChan{&name, message.GetHeartBeat(), conn}
 	}
 	if message.GetPeerList() != nil {
+		// do nothing
+	}
+	if message.GetHoldElection() != nil {
+		rx.channels.holdElection <- message.GetHoldElection()
 	}
 }
 
 // records the existence of a peer, thread-safely
 func (rx *Server) recordPeer(conn *net.Conn) {
-	/*
-		rx.lock.Lock()
-		rx.peers[(*conn).RemoteAddr()] = conn
-		rx.lock.Unlock()
-	*/
 	rx.connChannels.newConn <- conn
 }
 
 // closes the conn and removes a peer from the map
 func (rx *Server) removePeer(conn *net.Conn) {
-	/*
-		(*conn).Close()
-		rx.lock.Lock()
-		delete(rx.peers, (*conn).RemoteAddr())
-		rx.lock.Unlock()
-	*/
 	rx.connChannels.removeConn <- conn
 }
 
@@ -244,12 +245,27 @@ func (rx *Server) BroadcastHeartBeat() {
 	rx.connChannels.broadcast <- rx.HeartBeatMessage()
 }
 
+func (rx *Server) BroadcastHoldElection(term uint32) {
+	rx.connChannels.broadcast <- rx.HoldElectionMessage(term)
+}
+
 func startServer(port uint16, name string) *Server {
 	server, err := NewServer(port, name)
 	if err != nil {
 		log.Fatal(err)
 	}
 	return server
+}
+
+func (rx *Server) HoldElectionMessage(term uint32) []byte {
+	elect := &messages.HoldElection{
+		Term: proto.Uint32(term),
+	}
+	data, _ := proto.Marshal(&messages.PeerMessage{
+		HoldElection: elect,
+		Name:         &rx.Name,
+	})
+	return data
 }
 
 // serializers
