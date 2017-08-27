@@ -9,6 +9,7 @@ message PeerMessage {
 message HeartBeat {
   required string name = 1;
   required uint64 createdTime = 2;
+  optional bool isIdentify = 3;
 }
 
 message PeerList {
@@ -24,5 +25,7 @@ message HoldElection {
 }
 
 message Ballot {
-  required string name = 1;
+  //required string name = 2;
+  required string candidate = 1;
+  required uint32 term = 2;
 }

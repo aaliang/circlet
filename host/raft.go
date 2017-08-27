@@ -32,11 +32,18 @@ func NewRaftChannels() *RaftChannels {
 
 func (rx *Server) raftLoop() {
 	//state
-	var lastHeartbeat uint64 = 0
-	var leader string
-	var isElectionNow = false // this might not even really be needed
-	var term uint32 = 0
-	var numPeers int = 0
+	var (
+		lastHeartbeat    uint64 = 0 //TODO: this should probably be a time.Duration
+		leader           string
+		isElectionNow           = false // this might not even really be needed
+		term             uint32 = 0
+		numPeers         int    = 0
+		lastTermVotedFor uint32 = 0 // not even needed either?
+		lastLogTerm      uint32 = 0
+		lastLogIndex     uint64 = 0
+	)
+
+	var _ = lastTermVotedFor
 
 	for {
 		select {
@@ -49,26 +56,40 @@ func (rx *Server) raftLoop() {
 				lastHeartbeat = createdTime
 			}
 		case now := <-rx.raftChannels.electionTimeout:
-			if !isElectionNow {
-				if lastHeartbeat+uint64(rx.heartbeatInterval) < now {
-					log.Println("need to elect")
-					isElectionNow = true
-					term++
-					rx.BroadcastHoldElection(term)
-					// TODO: vote for self
-				} else {
-					log.Println("pass")
-				}
+			var _ = isElectionNow
+			if lastHeartbeat+uint64(rx.heartbeatInterval) < now {
+				log.Println("need to elect")
+				isElectionNow = true
+				term++
+				rx.BroadcastHoldElection(term)
+				// TODO: perhaps should use separate variable instead of abusing lastHeartbeat time
+				lastHeartbeat = uint64(time.Now().UnixNano())
+				// TODO: vote for self
 			}
 		case electionRequest := <-rx.raftChannels.holdElection:
 			log.Println("got electionRequest", electionRequest)
 			if *(electionRequest.Term) > term {
 				isElectionNow = true
-				// need to vote
-			} /*else {
-				// do nothing
-			}*/
+				term = *electionRequest.Term
+				requestLastLogTerm := electionRequest.GetLastLogTerm()
+				// TODO: perhaps should use separate variable instead of abusing lastHeartbeat time
+				lastHeartbeat = uint64(time.Now().UnixNano())
+				// this algorithm prefers higher last log terms, then last log index
+				if requestLastLogTerm >= lastLogTerm {
+					// prefer electionRequest.leader
+					// vote for ^
+				} else if requestLastLogTerm == lastLogTerm {
+					if electionRequest.GetLastLogIndex() >= lastLogIndex {
+						// prefer electionRequest.leader
+					} else {
+						// vote for current leader
+					}
+				} else {
+					// vote for current leader
+				}
+			} // else do nothing
 		case n := <-rx.raftChannels.numPeers:
+			// tbh this variable is infrequently accessed. could be updated via atomics instead of message passing
 			numPeers = n
 			log.Println(numPeers, "peers")
 			var _ = numPeers
@@ -218,7 +239,7 @@ func (rx *Server) handle(conn net.Conn) {
 
 // reacts to a received protobuf PeerMessage
 func (rx *Server) onReceive(message *messages.PeerMessage, conn net.Conn) {
-	log.Println("unmarshalled protobuf", *message)
+	// log.Println("unmarshalled protobuf", *message)
 	// due to the optional payloads, many message types can be composed into a single PeerMessage
 	if message.GetHeartBeat() != nil {
 		rx.raftChannels.heartbeat <- message.GetHeartBeat()
@@ -228,6 +249,20 @@ func (rx *Server) onReceive(message *messages.PeerMessage, conn net.Conn) {
 	}
 	if message.GetHoldElection() != nil {
 		rx.raftChannels.holdElection <- message.GetHoldElection()
+	}
+}
+
+func (rx *Server) ConnectToPeer(addresses ...string) {
+	// TODO: don't connect if it's already connected
+	for _, address := range addresses {
+		log.Println("connecting to peer", address)
+		conn, err := net.Dial("tcp", address)
+		if err != nil {
+			log.Println("error connecting to peer", err)
+		} else {
+			go rx.handle(conn)
+			go rx.recordPeer(&conn)
+		}
 	}
 }
 
@@ -241,18 +276,6 @@ func (rx *Server) removePeer(conn *net.Conn) {
 	rx.connChannels.removeConn <- conn
 }
 
-func (rx *Server) ConnectToPeer(address string) {
-	// TODO: don't connect if it's already connected
-	log.Println("connecting to peer", address)
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		log.Println("error connecting to peer", err)
-	} else {
-		go rx.handle(conn)
-		rx.recordPeer(&conn)
-	}
-}
-
 func (rx *Server) BroadcastHeartBeat() {
 	rx.connChannels.broadcast <- rx.HeartBeatMessage()
 }
@@ -261,12 +284,10 @@ func (rx *Server) BroadcastHoldElection(term uint32) {
 	rx.connChannels.broadcast <- rx.HoldElectionMessage(term)
 }
 
-func startServer(port uint16, name string) *Server {
-	server, err := NewServer(port, name)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return server
+// TODO: ballots don't really need to be broadcast, just need to be sent to the candidate
+// this isn't quite possible yet, without adding a name net.Conn map
+func (rx *Server) BroadcastBallot(candidate string, term uint32) {
+	rx.connChannels.broadcast <- rx.BallotMessage(&candidate, term)
 }
 
 func (rx *Server) HoldElectionMessage(term uint32) []byte {
@@ -292,10 +313,32 @@ func (rx *Server) HeartBeatMessage() []byte {
 	return data
 }
 
+func (rx *Server) BallotMessage(candidate *string, term uint32) []byte {
+	ballot := &messages.Ballot{
+		Candidate: candidate,
+		Term:      proto.Uint32(term),
+	}
+	data, _ := proto.Marshal(&messages.PeerMessage{
+		Ballot: ballot,
+	})
+	return data
+}
+
+func startServer(port uint16, name string) *Server {
+	server, err := NewServer(port, name)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return server
+}
+
 func Start() {
 	s1 := startServer(9001, "alice")
 	s2 := startServer(9002, "bob")
-	s2.ConnectToPeer("0.0.0.0:9001")
+	s3 := startServer(9003, "carol")
+
+	s2.ConnectToPeer("0.0.0.0:9001", "0.0.0.0:9003")
+	s3.ConnectToPeer("0.0.0.0:9001", "0.0.0.0:9002")
 
 	var _ = s1
 
