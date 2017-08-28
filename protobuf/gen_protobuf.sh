@@ -2,4 +2,4 @@
 # set PATH=$PATH:$GOPATH/bin
 DIR=`dirname $0`
 set PATH=$PATH:~/go/bin
-protoc --go_out=messages $DIR/*.proto
+protoc --go_out=$DIR/../messages $DIR/*.proto
